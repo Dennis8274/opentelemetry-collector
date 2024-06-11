@@ -98,8 +98,11 @@ func newQueueSender(q exporterqueue.Queue[Request], set exporter.CreateSettings,
 	consumeFunc := func(ctx context.Context, req Request) error {
 		err := qs.nextSender.send(ctx, req)
 		if err != nil {
-			set.Logger.Error("Exporting failed. Dropping data."+exportFailureMessage,
+			set.Logger.Error("Exporting failed. "+exportFailureMessage,
 				zap.Error(err), zap.Int("dropped_items", req.ItemsCount()))
+			if h, ok := req.(DeferRequestHandler); ok && h.DeferExport(ctx) {
+				return nil
+			}
 		}
 		return err
 	}

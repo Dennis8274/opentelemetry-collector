@@ -22,24 +22,26 @@ var logsMarshaler = &plog.ProtoMarshaler{}
 var logsUnmarshaler = &plog.ProtoUnmarshaler{}
 
 type logsRequest struct {
-	ld     plog.Logs
-	pusher consumer.ConsumeLogsFunc
+	ld          plog.Logs
+	pusher      consumer.ConsumeLogsFunc
+	deferPusher consumer.ConsumeLogsFunc
 }
 
-func newLogsRequest(ld plog.Logs, pusher consumer.ConsumeLogsFunc) Request {
+func newLogsRequest(ld plog.Logs, pusher, deferPusher consumer.ConsumeLogsFunc) Request {
 	return &logsRequest{
-		ld:     ld,
-		pusher: pusher,
+		ld:          ld,
+		pusher:      pusher,
+		deferPusher: deferPusher,
 	}
 }
 
-func newLogsRequestUnmarshalerFunc(pusher consumer.ConsumeLogsFunc) exporterqueue.Unmarshaler[Request] {
+func newLogsRequestUnmarshalerFunc(pusher, deferPusher consumer.ConsumeLogsFunc) exporterqueue.Unmarshaler[Request] {
 	return func(bytes []byte) (Request, error) {
 		logs, err := logsUnmarshaler.UnmarshalLogs(bytes)
 		if err != nil {
 			return nil, err
 		}
-		return newLogsRequest(logs, pusher), nil
+		return newLogsRequest(logs, pusher, deferPusher), nil
 	}
 }
 
@@ -50,9 +52,17 @@ func logsRequestMarshaler(req Request) ([]byte, error) {
 func (req *logsRequest) OnError(err error) Request {
 	var logError consumererror.Logs
 	if errors.As(err, &logError) {
-		return newLogsRequest(logError.Data(), req.pusher)
+		return newLogsRequest(logError.Data(), req.pusher, nil)
 	}
 	return req
+}
+
+func (req *logsRequest) DeferExport(ctx context.Context) bool {
+	if req.deferPusher != nil {
+		req.deferPusher(ctx, req.ld)
+		return true
+	}
+	return false
 }
 
 func (req *logsRequest) Export(ctx context.Context) error {
@@ -76,6 +86,16 @@ func NewLogsExporter(
 	pusher consumer.ConsumeLogsFunc,
 	options ...Option,
 ) (exporter.Logs, error) {
+	return NewLogsDeferExporter(ctx, set, cfg, pusher, nil, options...)
+}
+
+func NewLogsDeferExporter(ctx context.Context,
+	set exporter.CreateSettings,
+	cfg component.Config,
+	pusher consumer.ConsumeLogsFunc,
+	deferPusher consumer.ConsumeLogsFunc,
+	options ...Option,
+) (exporter.Logs, error) {
 	if cfg == nil {
 		return nil, errNilConfig
 	}
@@ -83,10 +103,10 @@ func NewLogsExporter(
 		return nil, errNilPushLogsData
 	}
 	logsOpts := []Option{
-		withMarshaler(logsRequestMarshaler), withUnmarshaler(newLogsRequestUnmarshalerFunc(pusher)),
+		withMarshaler(logsRequestMarshaler), withUnmarshaler(newLogsRequestUnmarshalerFunc(pusher, deferPusher)),
 		withBatchFuncs(mergeLogs, mergeSplitLogs),
 	}
-	return NewLogsRequestExporter(ctx, set, requestFromLogs(pusher), append(logsOpts, options...)...)
+	return NewLogsRequestExporter(ctx, set, requestFromLogs(pusher, deferPusher), append(logsOpts, options...)...)
 }
 
 // RequestFromLogsFunc converts plog.Logs data into a user-defined request.
@@ -95,9 +115,9 @@ func NewLogsExporter(
 type RequestFromLogsFunc func(context.Context, plog.Logs) (Request, error)
 
 // requestFromLogs returns a RequestFromLogsFunc that converts plog.Logs into a Request.
-func requestFromLogs(pusher consumer.ConsumeLogsFunc) RequestFromLogsFunc {
+func requestFromLogs(pusher, deferPusher consumer.ConsumeLogsFunc) RequestFromLogsFunc {
 	return func(_ context.Context, ld plog.Logs) (Request, error) {
-		return newLogsRequest(ld, pusher), nil
+		return newLogsRequest(ld, pusher, deferPusher), nil
 	}
 }
 
@@ -134,6 +154,11 @@ func NewLogsRequestExporter(
 		sErr := be.send(ctx, req)
 		if errors.Is(sErr, queue.ErrQueueIsFull) {
 			be.obsrep.recordEnqueueFailure(ctx, component.DataTypeLogs, int64(req.ItemsCount()))
+		}
+		if sErr != nil {
+			if h, ok := req.(DeferRequestHandler); ok && h.DeferExport(ctx) {
+				return nil
+			}
 		}
 		return sErr
 	}, be.consumerOptions...)

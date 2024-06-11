@@ -32,6 +32,11 @@ type RequestErrorHandler interface {
 	OnError(error) Request
 }
 
+type DeferRequestHandler interface {
+	Request
+	DeferExport(ctx context.Context) bool
+}
+
 // RequestMarshaler is a function that can marshal a Request into bytes.
 // Deprecated: [v0.94.0] Use exporterqueue.Marshaler[Request] instead.
 type RequestMarshaler func(req Request) ([]byte, error)
