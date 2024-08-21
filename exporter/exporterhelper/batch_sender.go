@@ -207,9 +207,7 @@ func (bs *batchSender) sendMergeBatch(ctx context.Context, req Request) error {
 	bs.resetTimerCh <- struct{}{}
 	bs.mu.Unlock()
 	go func(b *batch) {
-		now := time.Now()
 		bt.err = bs.nextSender.send(b.ctx, b.request)
-		bs.logger.Info("batch sender export threshold", zap.Int64("elapsed(us)", time.Since(now).Microseconds()), zap.Int("count", b.request.ItemsCount()))
 		close(b.done)
 	}(bt)
 	<-bt.done
