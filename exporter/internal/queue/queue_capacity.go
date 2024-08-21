@@ -46,10 +46,7 @@ func (bcl queueCapacityLimiter[T]) Size() int {
 
 func (bcl queueCapacityLimiter[T]) claim(el T) bool {
 	size := bcl.sizeOf(el)
-	if bcl.used.Add(size) > bcl.cap {
-		bcl.releaseSize(size)
-		return false
-	}
+	bcl.used.Add(size)
 	return true
 }
 

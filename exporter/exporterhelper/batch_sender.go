@@ -61,8 +61,9 @@ func newBatchSender(cfg exporterbatcher.Config, set exporter.CreateSettings,
 }
 
 func (bs *batchSender) Start(_ context.Context, _ component.Host) error {
-	timer := time.NewTimer(bs.cfg.FlushTimeout)
 	go func() {
+		timer := time.NewTimer(bs.cfg.FlushTimeout)
+		defer timer.Stop()
 		for {
 			select {
 			case <-bs.shutdownCh:
@@ -78,9 +79,17 @@ func (bs *batchSender) Start(_ context.Context, _ component.Host) error {
 			case <-timer.C:
 				bs.mu.Lock()
 				if bs.activeBatch.request != nil {
-					bs.exportActiveBatch()
+					bt := bs.activeBatch
+					bs.activeBatch = newEmptyBatch()
+					bs.mu.Unlock()
+					go func(b *batch) {
+						now := time.Now()
+						b.err = bs.nextSender.send(b.ctx, b.request)
+						bs.logger.Info("batch sender export timer", zap.Int64("elapsed(us)", time.Since(now).Microseconds()))
+					}(bt)
+				} else {
+					bs.mu.Unlock()
 				}
-				bs.mu.Unlock()
 				timer.Reset(bs.cfg.FlushTimeout)
 			case <-bs.resetTimerCh:
 				if !timer.Stop() {
@@ -112,7 +121,7 @@ func newEmptyBatch() *batch {
 // Caller must hold the lock.
 func (bs *batchSender) exportActiveBatch() {
 	go func(b *batch) {
-		b.err = b.request.Export(b.ctx)
+		b.err = bs.nextSender.send(b.ctx, b.request)
 		close(b.done)
 	}(bs.activeBatch)
 	bs.activeBatch = newEmptyBatch()
@@ -122,8 +131,7 @@ func (bs *batchSender) exportActiveBatch() {
 // The batch is ready if it has reached the minimum size or the concurrency limit is reached.
 // Caller must hold the lock.
 func (bs *batchSender) isActiveBatchReady() bool {
-	return bs.activeBatch.request.ItemsCount() >= bs.cfg.MinSizeItems ||
-		(bs.concurrencyLimit > 0 && bs.activeRequests.Load() >= bs.concurrencyLimit)
+	return bs.activeBatch.request.ItemsCount() >= bs.cfg.MinSizeItems
 }
 
 func (bs *batchSender) send(ctx context.Context, req Request) error {
@@ -181,7 +189,6 @@ func (bs *batchSender) sendMergeBatch(ctx context.Context, req Request) error {
 	bs.mu.Lock()
 	bs.activeRequests.Add(1)
 	defer bs.activeRequests.Add(^uint64(0))
-
 	if bs.activeBatch.request != nil {
 		var err error
 		req, err = bs.mergeFunc(ctx, bs.activeBatch.request, req)
@@ -191,14 +198,22 @@ func (bs *batchSender) sendMergeBatch(ctx context.Context, req Request) error {
 		}
 	}
 	bs.updateActiveBatch(ctx, req)
-	batch := bs.activeBatch
-	if bs.isActiveBatchReady() {
-		bs.exportActiveBatch()
-		bs.resetTimerCh <- struct{}{}
+	if !bs.isActiveBatchReady() {
+		bs.mu.Unlock()
+		return nil
 	}
+	bt := bs.activeBatch
+	bs.activeBatch = newEmptyBatch()
+	bs.resetTimerCh <- struct{}{}
 	bs.mu.Unlock()
-	<-batch.done
-	return batch.err
+	go func(b *batch) {
+		now := time.Now()
+		bt.err = bs.nextSender.send(b.ctx, b.request)
+		bs.logger.Info("batch sender export threshold", zap.Int64("elapsed(us)", time.Since(now).Microseconds()), zap.Int("count", b.request.ItemsCount()))
+		close(b.done)
+	}(bt)
+	<-bt.done
+	return bt.err
 }
 
 // updateActiveBatch update the active batch to the new merged request and context.

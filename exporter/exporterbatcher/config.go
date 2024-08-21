@@ -64,7 +64,7 @@ func NewDefaultConfig() Config {
 		Enabled:      true,
 		FlushTimeout: 200 * time.Millisecond,
 		MinSizeConfig: MinSizeConfig{
-			MinSizeItems: 8192,
+			MinSizeItems: 256,
 		},
 	}
 }

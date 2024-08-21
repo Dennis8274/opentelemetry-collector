@@ -37,10 +37,8 @@ func NewBoundedMemoryQueue[T any](set MemoryQueueSettings[T]) Queue[T] {
 
 // Offer is used by the producer to submit new item to the queue. Calling this method on a stopped queue will panic.
 func (q *boundedMemoryQueue[T]) Offer(ctx context.Context, req T) error {
-	if !q.queueCapacityLimiter.claim(req) {
-		return ErrQueueIsFull
-	}
 	q.items <- queueRequest[T]{ctx: ctx, req: req}
+	q.queueCapacityLimiter.claim(req)
 	return nil
 }
 
