@@ -83,9 +83,7 @@ func (bs *batchSender) Start(_ context.Context, _ component.Host) error {
 					bs.activeBatch = newEmptyBatch()
 					bs.mu.Unlock()
 					go func(b *batch) {
-						now := time.Now()
 						b.err = bs.nextSender.send(b.ctx, b.request)
-						bs.logger.Info("batch sender export timer", zap.Int64("elapsed(us)", time.Since(now).Microseconds()))
 					}(bt)
 				} else {
 					bs.mu.Unlock()
